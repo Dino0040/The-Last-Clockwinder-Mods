@@ -262,6 +262,9 @@
 		<Reference Include="UnityEngine.XRModule">
 			<HintPath>$(THELASTCLOCKWINDER_INSTALL)\Clockwork_Data\Managed\UnityEngine.XRModule.dll</HintPath>
 		</Reference>
+		<Reference Include="NewtonVR">
+			<HintPath>$(THELASTCLOCKWINDER_INSTALL)\Clockwork_Data\Managed\NewtonVR.dll</HintPath>
+		</Reference>
 	</ItemGroup>
 	
 	<PropertyGroup>

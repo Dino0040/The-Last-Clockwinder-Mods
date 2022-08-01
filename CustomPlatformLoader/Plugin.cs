@@ -1,15 +1,27 @@
 ﻿using BepInEx;
 using BepInEx.Logging;
+using Core.Serialization;
+using Game.Components.AssistantRecord;
+using Game.Components.AudioLogs;
+using Game.Components.Collector;
+using Game.Components.Flows;
 using Game.Components.LevelSelect;
+using Game.Components.LevelToken;
+using Game.Components.Metrics;
+using Game.Components.Plants.CutPlant;
 using Game.Platforms;
+using Game.Platforms.Act3.Platform_FuelBeast;
 using Global.Scripts;
 using HarmonyLib;
+using Prototype.Components.Lilypad;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CustomPlatformLoader
 {
@@ -20,10 +32,130 @@ namespace CustomPlatformLoader
 
         static string CustomPlatformAssetBundlePath => Path.Combine(Application.streamingAssetsPath, "CustomPlatforms");
 
+        static bool exporting = false;
+
+        static readonly HashSet<string> customPlatformPaths = new HashSet<string>();
+
         private void Awake()
         {
             logger = Logger;
             Harmony.CreateAndPatchAll(typeof(Plugin));
+
+            SceneManager.sceneLoaded += ReplaceCustomMaterialsAndMeshesWithNative;
+        }
+
+        private void ReplaceCustomMaterialsAndMeshesWithNative(Scene scene, LoadSceneMode mode)
+        {
+            if (customPlatformPaths.Contains(scene.path))
+            {
+                var allRenderersInScene = scene.GetRootGameObjects()
+                    .SelectMany(g => g.GetComponentsInChildren<MeshRenderer>());
+                foreach (Renderer renderer in allRenderersInScene)
+                {
+                    Material[] rendererMaterials = renderer.sharedMaterials;
+                    for (int i = 0; i < rendererMaterials.Length; i++)
+                    {
+                        if (AssetExporter.AllMaterials.TryGetValue(rendererMaterials[i].name, out Material cachedMaterial))
+                        {
+                            rendererMaterials[i] = cachedMaterial;
+                        }
+                    }
+                    renderer.sharedMaterials = rendererMaterials;
+                }
+
+                var allMeshFiltersInScene = scene.GetRootGameObjects()
+                    .SelectMany(g => g.GetComponentsInChildren<MeshFilter>());
+                foreach (MeshFilter meshFilter in allMeshFiltersInScene)
+                {
+                    if (AssetExporter.AllMeshes.TryGetValue(meshFilter.gameObject.name, out Mesh mesh))
+                    {
+                        meshFilter.sharedMesh = mesh;
+                    }
+                }
+
+                var allMeshCollidersInScene = scene.GetRootGameObjects()
+                    .SelectMany(g => g.GetComponentsInChildren<MeshCollider>());
+                foreach (MeshCollider meshCollider in allMeshCollidersInScene)
+                {
+                    if (AssetExporter.AllMeshes.TryGetValue(meshCollider.gameObject.name, out Mesh mesh))
+                    {
+                        meshCollider.sharedMesh = mesh;
+                    }
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(Bootstrapper), "Awake")]
+        [HarmonyPrefix]
+        static bool StopBootstrapperAndExportNativeAssets(MonoBehaviour __instance)
+        {
+            if(AssetExporter.AllMaterials.Count == 0)
+            {
+                exporting = true;
+                __instance.enabled = false;
+                foreach (var comp in __instance.gameObject.GetComponents<Component>())
+                {
+                    if (!(comp is Transform || comp is RectTransform || comp is Bootstrapper))
+                    {
+                        Destroy(comp);
+                    }
+                }
+                foreach(Transform child in __instance.transform)
+                {
+                    Destroy(child);
+                }
+                DontDestroyOnLoad(__instance);
+                __instance.StartCoroutine(AssetExporter.ExportAll(logger, () =>
+                {
+                    exporting = false;
+                    SceneManager.LoadScene(0, LoadSceneMode.Single);
+                    Destroy(__instance.gameObject);
+                    foreach (KeyValuePair<string, Material> keyValuePair in AssetExporter.AllMaterials)
+                    {
+                        logger.LogInfo("Material: " + keyValuePair.Key);
+                    }
+                    foreach (KeyValuePair<string, Mesh> keyValuePair in AssetExporter.AllMeshes)
+                    {
+                        logger.LogInfo("Mesh: " + keyValuePair.Key);
+                    }
+                }));
+                return false;
+            }
+            return true;
+        }
+
+
+        [HarmonyPatch(typeof(SavableBehaviour), "Awake")]
+        [HarmonyPatch(typeof(IdentityBehaviour), "Awake")]
+        [HarmonyPatch(typeof(PlatformLockDrivers), "Update")]
+        [HarmonyPatch(typeof(FruitCollector), "Awake")]
+        [HarmonyPatch(typeof(PlatformContent), "Awake")]
+        [HarmonyPatch(typeof(CutPlant), "Awake")]
+        [HarmonyPatch(typeof(FuelBeast), "Awake")]
+        [HarmonyPatch(typeof(LilypadCloneCancel), "Awake")]
+        [HarmonyPatch(typeof(Flow), "Awake")]
+        [HarmonyPatch(typeof(KinematicDuringPlatformTransition), "OnDestroy")]
+        [HarmonyPatch(typeof(KinematicDuringPlatformTransition), "Awake")]
+        [HarmonyPatch(typeof(PlatformAssistantLimit), "OnDestroy")]
+        [HarmonyPatch(typeof(PlatformAssistantLimit), "Awake")]
+        [HarmonyPatch(typeof(Game.Platforms.Act3.Platform_Launch.LaunchFlow), "Awake")]
+        [HarmonyPatch(typeof(Game.Platforms.Act3.Platform_Launch.LaunchFlow), "OnDestroy")]
+        [HarmonyPatch(typeof(AudioLog), "Awake")]
+        [HarmonyPatch(typeof(AssistantRecord), "Awake")]
+        [HarmonyPatch(typeof(AssistantRecord), "FixedUpdate")]
+        [HarmonyPatch(typeof(ThroughputMetric), "Awake")]
+        [HarmonyPatch(typeof(LevelToken), "Awake")]
+        [HarmonyPatch(typeof(NewtonVR.NVRSnappable), "Awake")]
+        [HarmonyPatch(typeof(NewtonVR.NVRInteractableItem), "Start")]
+        [HarmonyPatch(typeof(ClockArm), "FixedUpdate")]
+        [HarmonyPrefix]
+        static bool StopAllBehavioursDuringExport(MonoBehaviour __instance)
+        {
+            if (exporting)
+            {
+                return false;
+            }
+            return true;
         }
 
         [HarmonyPatch(typeof(PlatformManager), nameof(PlatformManager.PlatformList))]
@@ -84,6 +216,8 @@ namespace CustomPlatformLoader
                     platformDefinition.NoEstimation = true;
                     platformDefinition.ContentScene.ScenePath = scenePath;
                     #endregion
+
+                    customPlatformPaths.Add(scenePath);
 
                     geoIndex++;
                 }
